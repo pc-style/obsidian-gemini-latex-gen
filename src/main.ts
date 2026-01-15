@@ -1,12 +1,16 @@
 import { Editor, MarkdownView, Notice, Plugin } from 'obsidian';
 import { GeminiLatexSettings, DEFAULT_SETTINGS, GeminiLatexSettingTab } from './settings';
 import { GoogleGenAI } from '@google/genai';
+import { latexSuggestionExtension } from './suggestion';
 
 export default class GeminiLatexPlugin extends Plugin {
 	settings: GeminiLatexSettings;
 
 	async onload() {
 		await this.loadSettings();
+
+		// Register Autocomplete Extension
+		this.registerEditorExtension(latexSuggestionExtension(this));
 
 		this.addCommand({
 			id: 'gemini-latex-convert',
@@ -29,15 +33,22 @@ export default class GeminiLatexPlugin extends Plugin {
 
 					const genAI = new GoogleGenAI({ apiKey: this.settings.apiKey });
 					// We use the setting value which defaults to 'gemini-3-flash-preview'.
-					// If the user manually set a different model in settings, we respect that.
 
+					// Improved Prompt for Strict Wrapping
 					const prompt = `Convert the following natural language text into a LaTeX equation or expression. 
-					Return ONLY the LaTeX code, nothing else. Do not wrap in markdown code blocks unless strictly necessary for display, but prefer raw LaTeX. 
-					If it's an equation, include the enclosing $ or $$ signs if appropriate, but usually just the math content is best so it can be inline.
-					Actually, let's output it as standard LaTeX math mode content. 
-					Example Input: "area of circle"
-					Example Output: A = \pi r^2
+					Return ONLY the LaTeX code, nothing else. 
 					
+					FORMATTING RULES:
+					1. If the result is a complex equation or should be on its own line, wrap it in double dollar signs: $$ ... $$
+					2. If it is a small inline expression, wrap it in single dollar signs: $ ... $
+					3. Prefer $$ (Block Math) for any equation with an equals sign unless it's very short.
+					
+					Example Input: "area of circle"
+					Example Output: $$ A = \pi r^2 $$
+					
+					Example Input: "alpha"
+					Example Output: $ \alpha $
+
 					Text to convert:
 					"${selection}"`;
 
@@ -46,13 +57,23 @@ export default class GeminiLatexPlugin extends Plugin {
 						contents: prompt
 					});
 
-					const latex = response.text ? response.text.trim() : '';
+					let latex = response.text ? response.text.trim() : '';
 
 					// Clean up potential markdown code blocks if the model adds them
-					const cleanLatex = latex.replace(/^```latex\n/, '').replace(/^```\n/, '').replace(/\n```$/, '');
+					latex = latex.replace(/^```latex\n/, '').replace(/^```\n/, '').replace(/\n```$/, '').trim();
 
-					if (cleanLatex) {
-						editor.replaceSelection(cleanLatex);
+					// Strict fallback wrapping if model fails to follow instructions
+					if (latex && !latex.startsWith('$')) {
+						// Simple heuristic: if it contains =, assume block math
+						if (latex.includes('=')) {
+							latex = `$$ ${latex} $$`;
+						} else {
+							latex = `$ ${latex} $`;
+						}
+					}
+
+					if (latex) {
+						editor.replaceSelection(latex);
 						new Notice('Converted to LaTeX!');
 					} else {
 						new Notice('Failed to generate LaTeX content.');
