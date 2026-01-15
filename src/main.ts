@@ -1,7 +1,10 @@
-import { Editor, MarkdownView, Notice, Plugin } from 'obsidian';
+import { Editor, MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 import { GeminiLatexSettings, DEFAULT_SETTINGS, GeminiLatexSettingTab } from './settings';
 import { GoogleGenAI } from '@google/genai';
 import { latexSuggestionExtension } from './suggestion';
+import { LaTeXSlashSuggest } from './slashCommands';
+import { performOCR, fileToBase64 } from './ocr';
+import { DrawingModal } from './canvasModal';
 
 export default class GeminiLatexPlugin extends Plugin {
 	settings: GeminiLatexSettings;
@@ -9,83 +12,109 @@ export default class GeminiLatexPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// Register Autocomplete Extension
 		this.registerEditorExtension(latexSuggestionExtension(this));
+		this.registerEditorSuggest(new LaTeXSlashSuggest(this.app, this));
 
 		this.addCommand({
 			id: 'gemini-latex-convert',
 			name: 'Convert selection to LaTeX',
-			editorCallback: async (editor: Editor, view: MarkdownView) => {
-				const selection = editor.getSelection();
+			editorCallback: (editor) => this.convertSelection(editor)
+		});
 
-				if (!selection) {
-					new Notice('Please select some text to convert.');
-					return;
-				}
-
-				if (!this.settings.apiKey) {
-					new Notice('Please set your Gemini API Key in the settings.');
-					return;
-				}
-
-				try {
-					new Notice('Generating LaTeX...');
-
-					const genAI = new GoogleGenAI({ apiKey: this.settings.apiKey });
-					// We use the setting value which defaults to 'gemini-3-flash-preview'.
-
-					// Improved Prompt for Strict Wrapping
-					const prompt = `Convert the following natural language text into a LaTeX equation or expression. 
-					Return ONLY the LaTeX code, nothing else. 
-					
-					FORMATTING RULES:
-					1. If the result is a complex equation or should be on its own line, wrap it in double dollar signs: $$ ... $$
-					2. If it is a small inline expression, wrap it in single dollar signs: $ ... $
-					3. Prefer $$ (Block Math) for any equation with an equals sign unless it's very short.
-					
-					Example Input: "area of circle"
-					Example Output: $$ A = \pi r^2 $$
-					
-					Example Input: "alpha"
-					Example Output: $ \alpha $
-
-					Text to convert:
-					"${selection}"`;
-
-					const response = await genAI.models.generateContent({
-						model: this.settings.modelName,
-						contents: prompt
-					});
-
-					let latex = response.text ? response.text.trim() : '';
-
-					// Clean up potential markdown code blocks if the model adds them
-					latex = latex.replace(/^```latex\n/, '').replace(/^```\n/, '').replace(/\n```$/, '').trim();
-
-					// Strict fallback wrapping if model fails to follow instructions
-					if (latex && !latex.startsWith('$')) {
-						// Simple heuristic: if it contains =, assume block math
-						if (latex.includes('=')) {
-							latex = `$$ ${latex} $$`;
-						} else {
-							latex = `$ ${latex} $`;
-						}
-					}
-
-					if (latex) {
-						editor.replaceSelection(latex);
-						new Notice('Converted to LaTeX!');
-					} else {
-						new Notice('Failed to generate LaTeX content.');
-					}
-				} catch (error) {
-					console.error('Gemini LaTeX Error:', error);
-					new Notice('Error converting to LaTeX. Check console for details.');
-				}
-			}
+		this.addCommand({
+			id: 'gemini-latex-draw',
+			name: 'Open Drawing Canvas',
+			editorCallback: (editor) => this.openDrawingCanvas(editor)
 		});
 
 		this.addSettingTab(new GeminiLatexSettingTab(this.app, this));
+	}
+
+	async convertSelection(editor: Editor) {
+		const selection = editor.getSelection();
+		if (!selection) {
+			new Notice('No text selected');
+			return;
+		}
+		const result = await this.callGemini(this.settings.modelName, `Convert to LaTeX: "${selection}"`);
+		if (result) editor.replaceSelection(result);
+	}
+
+	async executeSlashCommand(id: string, editor: Editor) {
+		switch (id) {
+			case 'convert-line':
+				const cursor = editor.getCursor();
+				const line = editor.getLine(cursor.line);
+				const result = await this.callGemini(this.settings.modelName, `Convert entire line to LaTeX: "${line}"`);
+				if (result) editor.setLine(cursor.line, result);
+				break;
+			case 'ocr-image':
+				this.handleOCR(editor);
+				break;
+			case 'draw-math':
+				this.openDrawingCanvas(editor);
+				break;
+			case 'find-all':
+				this.processEntireFile(editor);
+				break;
+			case 'explain':
+				this.explainMath(editor);
+				break;
+		}
+	}
+
+	async handleOCR(editor: Editor) {
+		new Notice('Please select an image file or paste one first. (OCR implementation requires manual file selection for now)');
+	}
+
+	async openDrawingCanvas(editor: Editor) {
+		new DrawingModal(this.app, async (base64) => {
+			new Notice('Processing drawing...');
+			const latex = await performOCR(this.settings.apiKey, base64, "Convert this handwritten math to LaTeX. Return only the LaTeX code.");
+			if (latex) {
+				editor.replaceSelection(`$ ${latex.trim()} $`);
+				new Notice('Inserted drawing as LaTeX!');
+			}
+		}).open();
+	}
+
+	async processEntireFile(editor: Editor) {
+		const content = editor.getValue();
+		new Notice('Reformatting entire file...');
+		const result = await this.callGemini(this.settings.modelName, `Find all mathematical text in this file and convert it to strictly formatted LaTeX ($ or $$). Keep non-math text as is. File content:\n\n${content}`);
+		if (result) {
+			editor.setValue(result);
+			new Notice('File processed!');
+		}
+	}
+
+	async explainMath(editor: Editor) {
+		const selection = editor.getSelection() || editor.getLine(editor.getCursor().line);
+		new Notice('Explaining...');
+		const explanation = await this.callGemini(this.settings.modelName, `Explain the mathematical concepts in this snippet step-by-step: "${selection}"`);
+		if (explanation) {
+			new Notice(explanation, 10000);
+		}
+	}
+
+	async callGemini(modelName: string, prompt: string): Promise<string> {
+		if (!this.settings.apiKey) {
+			new Notice('Set API Key in settings');
+			return '';
+		}
+		try {
+			const ai = new GoogleGenAI({ apiKey: this.settings.apiKey });
+			const fullPrompt = `${prompt}\n\nStrict Rules:\n1. Return ONLY the result.\n2. Use $$ for blocks, $ for inline.\n3. Clean, valid LaTeX.`;
+			const response = await ai.models.generateContent({
+				model: modelName,
+				contents: [{ role: 'user', parts: [{ text: fullPrompt }] }]
+			});
+			return response.text?.trim() || '';
+		} catch (e) {
+			console.error(e);
+			new Notice('Gemini Error');
+			return '';
+		}
 	}
 
 	async loadSettings() {

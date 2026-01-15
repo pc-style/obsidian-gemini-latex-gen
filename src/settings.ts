@@ -6,6 +6,8 @@ export interface GeminiLatexSettings {
 	enableAutocomplete: boolean;
 	autocompleteDelay: number;
 	autocompleteModel: string;
+	enableSlashCommands: boolean;
+	enableHoverPreview: boolean;
 }
 
 export const DEFAULT_SETTINGS: GeminiLatexSettings = {
@@ -13,7 +15,9 @@ export const DEFAULT_SETTINGS: GeminiLatexSettings = {
 	modelName: 'gemini-3-flash-preview',
 	enableAutocomplete: true,
 	autocompleteDelay: 1000,
-	autocompleteModel: 'gemini-2.5-flash-lite'
+	autocompleteModel: 'gemini-2.5-flash-lite',
+	enableSlashCommands: true,
+	enableHoverPreview: true
 }
 
 export class GeminiLatexSettingTab extends PluginSettingTab {
@@ -50,6 +54,28 @@ export class GeminiLatexSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.modelName)
 				.onChange(async (value) => {
 					this.plugin.settings.modelName = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h2', { text: 'Feature Toggles' });
+
+		new Setting(containerEl)
+			.setName('Enable Slash Commands')
+			.setDesc('Type / to open the LaTeX command menu')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableSlashCommands)
+				.onChange(async (value) => {
+					this.plugin.settings.enableSlashCommands = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Enable Hover Preview')
+			.setDesc('Show rendered LaTeX preview above suggestions')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableHoverPreview)
+				.onChange(async (value) => {
+					this.plugin.settings.enableHoverPreview = value;
 					await this.plugin.saveSettings();
 				}));
 

@@ -1,4 +1,3 @@
-import { Extension } from '@codemirror/state';
 import {
     EditorView,
     Decoration,
@@ -9,14 +8,13 @@ import {
     WidgetType,
     keymap
 } from '@codemirror/view';
-import { StateField, StateEffect } from '@codemirror/state';
+import { StateField, StateEffect, Prec } from '@codemirror/state';
 import { GoogleGenAI } from '@google/genai';
 import GeminiLatexPlugin from './main';
+import { renderMath, finishRenderMath } from 'obsidian';
 
-// Effect to update the current ghost text
 export const setGhostText = StateEffect.define<string | null>();
 
-// State field to hold the current ghost text
 const ghostTextField = StateField.define<string | null>({
     create: () => null,
     update(value, tr) {
@@ -25,23 +23,51 @@ const ghostTextField = StateField.define<string | null>({
         }
         if (tr.docChanged) return null;
         return value;
-    },
-    provide: (f) => [] // We don't provide decorations here anymore
+    }
 });
 
 class GhostTextWidget extends WidgetType {
-    constructor(readonly text: string) {
+    constructor(readonly text: string, readonly showPreview: boolean) {
         super();
     }
 
-    toDOM() {
-        const span = document.createElement('span');
-        span.textContent = this.text;
+    toDOM(view: EditorView) {
+        const container = document.createElement('span');
+        container.className = 'gemini-latex-ghost-container';
+
+        const span = container.createEl('span', {
+            text: this.text,
+            cls: 'cm-ghost-text'
+        });
         span.style.opacity = '0.5';
         span.style.fontStyle = 'italic';
         span.style.color = 'var(--text-muted)';
-        span.className = 'cm-ghost-text';
-        return span;
+
+        if (this.showPreview && this.text.trim()) {
+            const preview = container.createDiv({ cls: 'gemini-latex-hover-preview' });
+            preview.style.position = 'absolute';
+            preview.style.bottom = '100%';
+            preview.style.left = '0';
+            preview.style.background = 'var(--background-primary)';
+            preview.style.border = '1px solid var(--background-modifier-border)';
+            preview.style.padding = '5px';
+            preview.style.zIndex = '100';
+            preview.style.borderRadius = '4px';
+            preview.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+
+            let MathContent = this.text.replace(/\$\$/g, '').replace(/\$/g, '').trim();
+
+            const mathEl = preview.createSpan();
+            try {
+                const rendered = renderMath(MathContent, true);
+                mathEl.appendChild(rendered);
+                finishRenderMath();
+            } catch (e) {
+                mathEl.setText('Error rendering preview');
+            }
+        }
+
+        return container;
     }
 }
 
@@ -55,14 +81,11 @@ class LatexSuggestionPlugin implements PluginValue {
 
     update(update: ViewUpdate) {
         const ghostText = update.state.field(ghostTextField);
-
-        // Update decorations based on ghost text field
-        // We re-calculate this on every update to ensure it stays at the cursor or valid position
         if (ghostText) {
             const cursor = update.state.selection.main.head;
             this.decorations = Decoration.set([
                 Decoration.widget({
-                    widget: new GhostTextWidget(ghostText),
+                    widget: new GhostTextWidget(ghostText, this.plugin.settings.enableHoverPreview),
                     side: 1
                 }).range(cursor)
             ]);
@@ -73,61 +96,38 @@ class LatexSuggestionPlugin implements PluginValue {
         if (!this.plugin.settings.enableAutocomplete) return;
         if (!update.docChanged) return;
 
-        // Clear existing timer
-        if (this.delayTimer) {
-            window.clearTimeout(this.delayTimer);
-            this.delayTimer = null;
-        }
+        if (this.delayTimer) window.clearTimeout(this.delayTimer);
 
-        // Clear existing suggestion immediately on type if not already handled by field
-        if (ghostText !== null) {
-            // This might cause a loop if not careful, but field update handles docChanged so likely null already
-        }
-
-        // Set new timer
-        this.delayTimer = window.setTimeout(() => {
-            this.fetchSuggestion();
-        }, this.plugin.settings.autocompleteDelay);
+        this.delayTimer = window.setTimeout(() => this.fetchSuggestion(), this.plugin.settings.autocompleteDelay);
     }
 
     async fetchSuggestion() {
         const cursor = this.view.state.selection.main.head;
         const line = this.view.state.doc.lineAt(cursor);
-        const lineText = line.text;
-        const lineStart = line.from;
-        const relativeCursor = cursor - lineStart;
-
-        const context = lineText.slice(0, relativeCursor);
+        const context = line.text.substring(0, cursor - line.from);
 
         if (!context.trim()) return;
         if (!this.plugin.settings.apiKey) return;
 
         try {
-            const genAI = new GoogleGenAI({ apiKey: this.plugin.settings.apiKey });
-            const prompt = `Complete the following text with a LaTeX equivalent if IT IS a math expression. 
-			If the text matches a known mathematical concept, output the LaTeX equation starting with space.
-			Example: "area of circle" -> " = \\pi r^2"
-			Example: "quadratic formula" -> " x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}"
-			If it's NOT a math concept, return EMPTY STRING.
-			RETURN ONLY THE COMPLETION SUFFIX.
-			Input: "${context}"`;
+            const ai = new GoogleGenAI({ apiKey: this.plugin.settings.apiKey });
+            const prompt = `Suggest a LaTeX conversion for the current line fragment. 
+			If the line looks like a math description, return the LaTeX conversion (wrapped in $$ if complex).
+			Example: "integral of x squared" -> "$$ \\int x^2 \, dx $$"
+			Return ONLY the LaTeX or EMPTY STRING if no math detected.
+			Line: "${context}"`;
 
-            const response = await genAI.models.generateContent({
+            const response = await ai.models.generateContent({
                 model: this.plugin.settings.autocompleteModel,
-                contents: prompt
+                contents: [{ role: 'user', parts: [{ text: prompt }] }]
             });
 
-            const suggestion = response.text ? response.text.trimEnd() : '';
+            const suggestion = response.text?.trim() || '';
 
-            if (suggestion && suggestion.length > 0 && suggestion !== "null") {
-                this.view.dispatch({
-                    effects: setGhostText.of(suggestion)
-                });
+            if (suggestion && suggestion.startsWith('$')) {
+                this.view.dispatch({ effects: setGhostText.of(" " + suggestion) });
             }
-
-        } catch (e) {
-            // console.error(e);
-        }
+        } catch (e) { }
     }
 
     destroy() {
@@ -135,7 +135,6 @@ class LatexSuggestionPlugin implements PluginValue {
     }
 }
 
-// Keymap to accept suggestion
 const acceptSuggestionKeymap = keymap.of([
     {
         key: 'Tab',
@@ -143,9 +142,11 @@ const acceptSuggestionKeymap = keymap.of([
             const suggestion = view.state.field(ghostTextField);
             if (suggestion) {
                 const cursor = view.state.selection.main.head;
+                const line = view.state.doc.lineAt(cursor);
+                const from = line.from;
                 view.dispatch({
-                    changes: { from: cursor, insert: suggestion },
-                    selection: { anchor: cursor + suggestion.length },
+                    changes: { from: from, to: cursor, insert: suggestion.trim() },
+                    selection: { anchor: from + suggestion.trim().length },
                     effects: setGhostText.of(null)
                 });
                 return true;
@@ -160,5 +161,5 @@ export const latexSuggestionExtension = (plugin: GeminiLatexPlugin) => [
     ViewPlugin.define((view) => new LatexSuggestionPlugin(view, plugin), {
         decorations: v => v.decorations
     }),
-    acceptSuggestionKeymap
+    Prec.highest(acceptSuggestionKeymap)
 ];
