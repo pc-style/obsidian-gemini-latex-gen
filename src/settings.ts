@@ -1,35 +1,47 @@
-import {App, PluginSettingTab, Setting} from "obsidian";
-import MyPlugin from "./main";
+import { App, PluginSettingTab, Setting, Plugin } from 'obsidian';
 
-export interface MyPluginSettings {
-	mySetting: string;
+export interface GeminiLatexSettings {
+	apiKey: string;
+	modelName: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+export const DEFAULT_SETTINGS: GeminiLatexSettings = {
+	apiKey: '',
+	modelName: 'gemini-3-flash-preview'
 }
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class GeminiLatexSettingTab extends PluginSettingTab {
+	plugin: any;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: any) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc('It\'s a secret')
+			.setName('Gemini API Key')
+			.setDesc('Enter your Google Gemini API Key')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Enter your secret key')
+				.setValue(this.plugin.settings.apiKey)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.apiKey = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Model Name')
+			.setDesc('The Gemini model to use (e.g., gemini-3-flash-preview)')
+			.addText(text => text
+				.setPlaceholder('gemini-3-flash-preview')
+				.setValue(this.plugin.settings.modelName)
+				.onChange(async (value) => {
+					this.plugin.settings.modelName = value;
 					await this.plugin.saveSettings();
 				}));
 	}

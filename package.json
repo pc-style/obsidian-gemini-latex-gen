@@ -24,6 +24,7 @@
 		"jiti": "2.6.1"
 	},
 	"dependencies": {
+		"@google/genai": "^1.36.0",
 		"obsidian": "latest"
 	}
 }
